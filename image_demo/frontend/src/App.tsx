@@ -357,7 +357,7 @@ export default function App() {
 
     // Handle refine vs create mode
     if (refinementMode === 'refine') {
-      if (!selectedSegmentId) {
+      if (selectedSegmentId === null) {
         setError('Please select a segment to refine');
         return;
       }
@@ -368,7 +368,7 @@ export default function App() {
   };
 
   const handleRefineSegment = async (bbox: number[]) => {
-    if (!selectedSegmentId || !imageFile) {
+    if (selectedSegmentId === null || !imageFile) {
       return;
     }
 
@@ -1169,7 +1169,7 @@ export default function App() {
 
                   <p className="hint">
                     {refinementMode === 'refine'
-                      ? selectedSegmentId
+                      ? selectedSegmentId !== null
                         ? `✓ Segment ${selectedSegmentId} selected. Draw a box on the image to refine it.`
                         : 'Click a segment card below to select it, then draw a bounding box on the image to refine it.'
                       : 'Draw a bounding box on the image to create a new independent mask in that region.'}
