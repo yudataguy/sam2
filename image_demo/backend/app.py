@@ -44,13 +44,32 @@ def _resolve_device() -> torch.device:
         device = torch.device("cpu")
     logger.info("using device %s", device)
     if device.type == "cuda" and torch.cuda.get_device_properties(0).major >= 8:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        _enable_tf32()
     elif device.type == "mps":
         logger.warning(
             "MPS support is experimental and may lead to numerical differences vs. CUDA"
         )
     return device
+
+
+def _enable_tf32() -> None:
+    """
+    Enable TF32 math on Ampere+ GPUs using the new PyTorch API when available,
+    while remaining compatible with earlier releases.
+    """
+    matmul_backend = getattr(torch.backends.cuda, "matmul", None)
+    cudnn_conv = getattr(torch.backends.cudnn, "conv", None)
+
+    if hasattr(matmul_backend, "fp32_precision"):
+        # New API (PyTorch >= 2.5) – "high" allows TF32
+        matmul_backend.fp32_precision = "high"
+    else:  # pragma: no cover - legacy fall back
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    if hasattr(cudnn_conv, "fp32_precision"):
+        cudnn_conv.fp32_precision = "tf32"
+    else:  # pragma: no cover - legacy fall back
+        torch.backends.cudnn.allow_tf32 = True
 
 
 def _load_mask_generator(model_size: str) -> SAM2AutomaticMaskGenerator:

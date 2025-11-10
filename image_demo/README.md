@@ -21,7 +21,7 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \  # optional on Apple Silicon
 python app.py
 ```
 
-```
+```bash
 cd image_demo/backend
 APP_ROOT="$(pwd)/../.." \
 MODEL_SIZE=base_plus \
