@@ -304,7 +304,7 @@ export default function App() {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeTab !== 'refine' || !selectedSegmentId) {
+    if (activeTab !== 'refine' || selectedSegmentId === null) {
       return;
     }
 
@@ -707,7 +707,7 @@ export default function App() {
                 onMouseUp={handleMouseUp}
                 onClick={handleImageClick}
                 style={{
-                  cursor: activeTab === 'refine' && selectedSegmentId ? 'crosshair' : selectedLabel && activeTab === 'segments' ? 'pointer' : 'default',
+                  cursor: activeTab === 'refine' && selectedSegmentId !== null ? 'crosshair' : selectedLabel && activeTab === 'segments' ? 'pointer' : 'default',
                 }}
               />
             </div>
