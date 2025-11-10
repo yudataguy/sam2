@@ -61,8 +61,8 @@ def _enable_tf32() -> None:
     cudnn_conv = getattr(torch.backends.cudnn, "conv", None)
 
     if hasattr(matmul_backend, "fp32_precision"):
-        # New API (PyTorch >= 2.5) – "high" allows TF32
-        matmul_backend.fp32_precision = "high"
+        # New API (PyTorch >= 2.5)
+        matmul_backend.fp32_precision = "tf32"
     else:  # pragma: no cover - legacy fall back
         torch.backends.cuda.matmul.allow_tf32 = True
 
