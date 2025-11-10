@@ -50,8 +50,10 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'segments' | 'refine'>('segments');
+
   // Refinement state
-  const [isRefineMode, setIsRefineMode] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [bboxStart, setBboxStart] = useState<{x: number; y: number} | null>(null);
   const [bboxCurrent, setBboxCurrent] = useState<{x: number; y: number} | null>(null);
@@ -302,7 +304,7 @@ export default function App() {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isRefineMode || !selectedSegmentId) {
+    if (activeTab !== 'refine' || !selectedSegmentId) {
       return;
     }
 
@@ -401,7 +403,7 @@ export default function App() {
 
   const handleImageClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     // Handle labeling via direct image click
-    if (!selectedLabel || isRefineMode || isDrawing) {
+    if (!selectedLabel || activeTab !== 'segments' || isDrawing) {
       return;
     }
 
@@ -455,12 +457,12 @@ export default function App() {
   }, [bboxStart, bboxCurrent]);
 
   const handleSegmentClick = (segmentId: number | string) => {
-    if (isRefineMode) {
+    if (activeTab === 'refine') {
       setSelectedSegmentId(segmentId);
       // Clear any previous bbox
       setBboxStart(null);
       setBboxCurrent(null);
-    } else if (selectedLabel) {
+    } else if (selectedLabel && activeTab === 'segments') {
       // Paint bucket mode: assign label to segment
       assignLabelToSegment(segmentId, selectedLabel);
     }
@@ -684,35 +686,101 @@ export default function App() {
             </button>
 
             <hr />
+          </form>
 
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={isRefineMode}
-                onChange={event => {
-                  setIsRefineMode(event.target.checked);
-                  if (!event.target.checked) {
-                    setSelectedSegmentId(null);
-                    setBboxStart(null);
-                    setBboxCurrent(null);
-                  }
+          {error && <p className="error">{error}</p>}
+          {responseMetadata?.saved_to && (
+            <p className="hint">Saved on server: {responseMetadata.saved_to}</p>
+          )}
+        </section>
+
+        <section className="viewer-panel">
+          {imageUrl ? (
+            <div className="viewer">
+              <img ref={imageRef} src={imageUrl} alt="uploaded" />
+              <canvas ref={canvasRef} />
+              <canvas
+                ref={overlayCanvasRef}
+                className="overlay-canvas"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onClick={handleImageClick}
+                style={{
+                  cursor: activeTab === 'refine' && selectedSegmentId ? 'crosshair' : selectedLabel && activeTab === 'segments' ? 'pointer' : 'default',
                 }}
-                disabled={segments.length === 0}
               />
-              Refinement Mode
-            </label>
+            </div>
+          ) : (
+            <div className="placeholder">Upload an image to see the preview.</div>
+          )}
+        </section>
 
-            {isRefineMode && (
-              <p className="hint">
-                {selectedSegmentId
-                  ? `Selected segment ${selectedSegmentId}. Draw a box on the image to refine.`
-                  : 'Click a segment card to select it for refinement, then draw a box on the image.'}
+        <section className="panel segments-panel">
+          {/* Tab Navigation */}
+          <div className="tabs">
+            <button
+              type="button"
+              className={`tab-button ${activeTab === 'segments' ? 'active' : ''}`}
+              onClick={() => {
+                setActiveTab('segments');
+                setSelectedSegmentId(null);
+                setBboxStart(null);
+                setBboxCurrent(null);
+              }}
+              disabled={segments.length === 0}
+            >
+              Segments ({segments.length})
+            </button>
+            <button
+              type="button"
+              className={`tab-button ${activeTab === 'refine' ? 'active' : ''}`}
+              onClick={() => setActiveTab('refine')}
+              disabled={segments.length === 0}
+            >
+              Refine
+            </button>
+          </div>
+
+          {/* Segments Tab Content */}
+          <div className={`tab-content ${activeTab === 'segments' ? 'active' : ''}`}>
+            <div className="panel-header">
+              <h2>Segments & Labels</h2>
+              <div style={{display: 'flex', gap: '0.5rem', flexWrap: 'wrap'}}>
+                <button
+                  onClick={saveProject}
+                  disabled={isSaving || segments.length === 0}
+                  style={{
+                    backgroundColor: '#10b981',
+                    fontSize: '1.05rem',
+                    fontWeight: 600,
+                    padding: '0.75rem 1.5rem',
+                  }}
+                >
+                  {isSaving ? 'Saving...' : '💾 Save Project'}
+                </button>
+                <button onClick={downloadCocoJson} disabled={segments.length === 0}>
+                  Download COCO JSON
+                </button>
+                <button onClick={downloadJson} disabled={!responseMetadata}>
+                  Download RAW JSON
+                </button>
+              </div>
+            </div>
+
+            {lastSaved && (
+              <p className="hint" style={{color: '#10b981'}}>
+                ✓ Last saved: {lastSaved.toLocaleTimeString()} (Auto-save in 30s)
               </p>
             )}
+            {saveError && <p className="error">Save failed: {saveError}</p>}
 
-            <hr />
+            {responseMetadata?.model_size && (
+              <p className="hint">Generated with model: {responseMetadata.model_size}</p>
+            )}
 
-            <div>
+            {/* Labels Section */}
+            <div style={{marginBottom: '1.5rem'}}>
               <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem'}}>
                 <strong>Labels</strong>
                 <button
@@ -780,13 +848,12 @@ export default function App() {
                 </div>
               )}
 
-              <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem'}}>
+              <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem'}}>
                 {labels.map(label => (
                   <button
                     key={label}
                     type="button"
                     onClick={() => setSelectedLabel(selectedLabel === label ? null : label)}
-                    disabled={isRefineMode}
                     className={selectedLabel === label ? 'label-button selected' : 'label-button'}
                     style={{
                       padding: '0.5rem 0.75rem',
@@ -795,8 +862,7 @@ export default function App() {
                       color: selectedLabel === label ? '#fff' : '#334155',
                       border: `2px solid ${getLabelColor(label)}`,
                       borderRadius: '8px',
-                      cursor: isRefineMode ? 'not-allowed' : 'pointer',
-                      opacity: isRefineMode ? 0.5 : 1,
+                      cursor: 'pointer',
                     }}
                   >
                     {label}
@@ -804,134 +870,121 @@ export default function App() {
                 ))}
               </div>
 
-              {selectedLabel && !isRefineMode && (
+              {selectedLabel && (
                 <p className="hint">
                   Label selected: <strong>{selectedLabel}</strong>. Click on the image over a segment or click segment cards to apply this label.
                 </p>
               )}
             </div>
-          </form>
 
-          {error && <p className="error">{error}</p>}
-          {responseMetadata?.saved_to && (
-            <p className="hint">Saved on server: {responseMetadata.saved_to}</p>
-          )}
-        </section>
-
-        <section className="viewer-panel">
-          {imageUrl ? (
-            <div className="viewer">
-              <img ref={imageRef} src={imageUrl} alt="uploaded" />
-              <canvas ref={canvasRef} />
-              <canvas
-                ref={overlayCanvasRef}
-                className="overlay-canvas"
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onClick={handleImageClick}
-                style={{
-                  cursor: isRefineMode && selectedSegmentId ? 'crosshair' : selectedLabel && !isRefineMode ? 'pointer' : 'default',
-                }}
-              />
-            </div>
-          ) : (
-            <div className="placeholder">Upload an image to see the preview.</div>
-          )}
-        </section>
-
-        <section className="panel segments-panel">
-          <div className="panel-header">
-            <h2>Segments ({segments.length})</h2>
-            <div style={{display: 'flex', gap: '0.5rem', flexWrap: 'wrap'}}>
-              <button
-                onClick={saveProject}
-                disabled={isSaving || segments.length === 0}
-                style={{
-                  backgroundColor: '#10b981',
-                  fontSize: '1.05rem',
-                  fontWeight: 600,
-                  padding: '0.75rem 1.5rem',
-                }}
-              >
-                {isSaving ? 'Saving...' : '💾 Save Project'}
-              </button>
-              <button onClick={downloadCocoJson} disabled={segments.length === 0}>
-                Download COCO JSON
-              </button>
-              <button onClick={downloadJson} disabled={!responseMetadata}>
-                Download RAW JSON
-              </button>
-            </div>
+            {/* Segments Grid */}
+            {segments.length === 0 ? (
+              <p className="hint">Run segmentation to populate mask proposals.</p>
+            ) : (
+              <div className="segment-grid">
+                {segments.map(segment => {
+                  const displayColor = segment.label ? getLabelColor(segment.label) : segment.color;
+                  return (
+                    <article
+                      key={segment.id}
+                      className={`segment-card ${selectedLabel ? 'clickable' : ''}`}
+                      onClick={() => handleSegmentClick(segment.id)}
+                      style={{
+                        cursor: selectedLabel ? 'pointer' : 'default',
+                      }}
+                    >
+                      <div className="swatch" style={{backgroundColor: displayColor}} />
+                      <div style={{flex: 1}}>
+                        <p className="segment-title">Mask #{segment.id}</p>
+                        {segment.label && (
+                          <p style={{margin: '0.25rem 0', fontSize: '0.85rem', fontWeight: 600, color: displayColor}}>
+                            Label: {segment.label}
+                          </p>
+                        )}
+                        <p className="segment-meta">
+                          area: {segment.area.toFixed(0)} px² • IoU:{' '}
+                          {segment.predicted_iou.toFixed(3)}
+                        </p>
+                      </div>
+                      {segment.label && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            clearSegmentLabel(segment.id);
+                          }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#dc2626',
+                            cursor: 'pointer',
+                            fontSize: '1.2rem',
+                            padding: '0.25rem',
+                            lineHeight: 1,
+                          }}
+                          title="Clear label"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {lastSaved && (
-            <p className="hint" style={{color: '#10b981'}}>
-              ✓ Last saved: {lastSaved.toLocaleTimeString()} (Auto-save in 30s)
-            </p>
-          )}
-          {saveError && <p className="error">Save failed: {saveError}</p>}
+          {/* Refine Tab Content */}
+          <div className={`tab-content ${activeTab === 'refine' ? 'active' : ''}`}>
+            <div style={{marginBottom: '1.5rem'}}>
+              <h3 style={{margin: '0 0 1rem 0'}}>Refinement Mode</h3>
 
-          {responseMetadata?.model_size && (
-            <p className="hint">Generated with model: {responseMetadata.model_size}</p>
-          )}
+              {segments.length === 0 ? (
+                <p className="hint">Run segmentation first to refine masks.</p>
+              ) : (
+                <>
+                  <p className="hint">
+                    {selectedSegmentId
+                      ? `✓ Segment ${selectedSegmentId} selected. Draw a box on the image to refine it.`
+                      : 'Click a segment card below to select it, then draw a bounding box on the image to refine it.'}
+                  </p>
 
-          {segments.length === 0 ? (
-            <p className="hint">Run segmentation to populate mask proposals.</p>
-          ) : (
-            <div className="segment-grid">
-              {segments.map(segment => {
-                const displayColor = segment.label ? getLabelColor(segment.label) : segment.color;
-                return (
-                  <article
-                    key={segment.id}
-                    className={`segment-card ${
-                      isRefineMode && selectedSegmentId === segment.id ? 'selected' : ''
-                    } ${isRefineMode || selectedLabel ? 'clickable' : ''}`}
-                    onClick={() => handleSegmentClick(segment.id)}
-                    style={{
-                      cursor: isRefineMode || selectedLabel ? 'pointer' : 'default',
-                    }}
-                  >
-                    <div className="swatch" style={{backgroundColor: displayColor}} />
-                    <div style={{flex: 1}}>
-                      <p className="segment-title">Mask #{segment.id}</p>
-                      {segment.label && (
-                        <p style={{margin: '0.25rem 0', fontSize: '0.85rem', fontWeight: 600, color: displayColor}}>
-                          Label: {segment.label}
-                        </p>
-                      )}
-                      <p className="segment-meta">
-                        area: {segment.area.toFixed(0)} px² • IoU:{' '}
-                        {segment.predicted_iou.toFixed(3)}
-                      </p>
+                  <div style={{marginTop: '1.5rem'}}>
+                    <h4 style={{margin: '0 0 0.75rem 0', fontSize: '0.95rem'}}>Segments</h4>
+                    <div className="segment-grid">
+                      {segments.map(segment => {
+                        const displayColor = segment.label ? getLabelColor(segment.label) : segment.color;
+                        return (
+                          <article
+                            key={segment.id}
+                            className={`segment-card ${selectedSegmentId === segment.id ? 'selected' : ''} clickable`}
+                            onClick={() => handleSegmentClick(segment.id)}
+                            style={{
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div className="swatch" style={{backgroundColor: displayColor}} />
+                            <div style={{flex: 1}}>
+                              <p className="segment-title">Mask #{segment.id}</p>
+                              {segment.label && (
+                                <p style={{margin: '0.25rem 0', fontSize: '0.85rem', fontWeight: 600, color: displayColor}}>
+                                  Label: {segment.label}
+                                </p>
+                              )}
+                              <p className="segment-meta">
+                                area: {segment.area.toFixed(0)} px² • IoU:{' '}
+                                {segment.predicted_iou.toFixed(3)}
+                              </p>
+                            </div>
+                          </article>
+                        );
+                      })}
                     </div>
-                    {segment.label && !isRefineMode && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          clearSegmentLabel(segment.id);
-                        }}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#dc2626',
-                          cursor: 'pointer',
-                          fontSize: '1.2rem',
-                          padding: '0.25rem',
-                          lineHeight: 1,
-                        }}
-                        title="Clear label"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </article>
-                );
-              })}
+                  </div>
+                </>
+              )}
             </div>
-          )}
+          </div>
         </section>
       </main>
     </div>

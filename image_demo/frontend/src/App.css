@@ -112,11 +112,11 @@ button:disabled {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
-  height: auto;
   display: block;
   border-radius: 8px;
   pointer-events: none;
+  max-width: 100%;
+  height: auto;
 }
 
 .viewer canvas.overlay-canvas {
@@ -178,6 +178,50 @@ button:disabled {
   margin: 0;
   font-size: 0.85rem;
   color: #475569;
+}
+
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid #e2e8f0;
+  margin-bottom: 1.25rem;
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 500;
+  color: #475569;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s ease;
+}
+
+.tab-button:hover {
+  color: #1e293b;
+  background-color: #f8fafc;
+}
+
+.tab-button.active {
+  color: #0ea5e9;
+  border-bottom-color: #0ea5e9;
+}
+
+.tab-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: transparent;
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
 }
 
 @media (min-width: 900px) {
