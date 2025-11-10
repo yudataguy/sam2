@@ -1,4 +1,4 @@
-import {ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState} from 'react';
+import {ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {decode, RLEObject} from './utils/mask';
 import './App.css';
 
@@ -90,6 +90,25 @@ export default function App() {
   }, [labels]);
 
   const sanitizedEndpoint = useMemo(() => backendUrl.replace(/\/$/, ''), [backendUrl]);
+
+  // Get color for a label (consistent color per label)
+  const getLabelColor = (label: string): string => {
+    const index = labels.indexOf(label);
+    if (index === -1) return '#000000';
+    const hue = (index * 0.618033988749895) % 1.0;
+    const r = Math.floor(Math.sin(hue * Math.PI * 2) * 127 + 128);
+    const g = Math.floor(Math.sin((hue + 0.33) * Math.PI * 2) * 127 + 128);
+    const b = Math.floor(Math.sin((hue + 0.66) * Math.PI * 2) * 127 + 128);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+  };
+
+  // Override segment colors based on labels
+  const segmentsWithLabelColors = useMemo(() => {
+    return segments.map(seg => ({
+      ...seg,
+      color: seg.label ? getLabelColor(seg.label) : seg.color,
+    }));
+  }, [segments, labels]);
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -386,27 +405,8 @@ export default function App() {
     );
   };
 
-  // Get color for a label (consistent color per label)
-  const getLabelColor = (label: string): string => {
-    const index = labels.indexOf(label);
-    if (index === -1) return '#000000';
-    const hue = (index * 0.618033988749895) % 1.0;
-    const r = Math.floor(Math.sin(hue * Math.PI * 2) * 127 + 128);
-    const g = Math.floor(Math.sin((hue + 0.33) * Math.PI * 2) * 127 + 128);
-    const b = Math.floor(Math.sin((hue + 0.66) * Math.PI * 2) * 127 + 128);
-    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-  };
-
-  // Override segment colors based on labels
-  const segmentsWithLabelColors = useMemo(() => {
-    return segments.map(seg => ({
-      ...seg,
-      color: seg.label ? getLabelColor(seg.label) : seg.color,
-    }));
-  }, [segments, labels]);
-
   // Save project function
-  const saveProject = async () => {
+  const saveProject = useCallback(async () => {
     if (!responseMetadata || segments.length === 0) {
       return;
     }
@@ -445,7 +445,7 @@ export default function App() {
     } finally {
       setIsSaving(false);
     }
-  };
+  }, [responseMetadata, segments, labels, imageFile, sanitizedEndpoint]);
 
   // Auto-save logic with debounce
   useEffect(() => {
@@ -469,7 +469,7 @@ export default function App() {
         window.clearTimeout(autoSaveTimeoutRef.current);
       }
     };
-  }, [segments, labels]);
+  }, [segments, labels, saveProject]);
 
   // Download COCO JSON
   const downloadCocoJson = () => {
