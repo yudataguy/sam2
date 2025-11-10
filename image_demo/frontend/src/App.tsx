@@ -3,7 +3,7 @@ import {decode, RLEObject} from './utils/mask';
 import './App.css';
 
 type Segment = {
-  id: number;
+  id: number | string;
   bbox: number[];
   area: number;
   predicted_iou: number;
@@ -13,6 +13,9 @@ type Segment = {
     counts: string;
     size: [number, number];
   };
+  label?: string;
+  refined_from?: number | string;
+  remainder_of?: number | string;
 };
 
 type SegmentResponse = {
@@ -47,8 +50,31 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Refinement state
+  const [isRefineMode, setIsRefineMode] = useState(false);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [bboxStart, setBboxStart] = useState<{x: number; y: number} | null>(null);
+  const [bboxCurrent, setBboxCurrent] = useState<{x: number; y: number} | null>(null);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<number | string | null>(null);
+
+  // Labeling state
+  const [labels, setLabels] = useState<string[]>(() => {
+    const saved = localStorage.getItem('sam2_labels');
+    return saved ? JSON.parse(saved) : ['apple', 'orange', 'strawberry'];
+  });
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [newLabelInput, setNewLabelInput] = useState('');
+  const [showLabelSettings, setShowLabelSettings] = useState(false);
+
+  // Save state
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const imageRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const autoSaveTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -57,6 +83,11 @@ export default function App() {
       }
     };
   }, [imageUrl]);
+
+  // Persist labels to localStorage
+  useEffect(() => {
+    localStorage.setItem('sam2_labels', JSON.stringify(labels));
+  }, [labels]);
 
   const sanitizedEndpoint = useMemo(() => backendUrl.replace(/\/$/, ''), [backendUrl]);
 
@@ -127,12 +158,12 @@ export default function App() {
     }
 
     if (!image.complete) {
-      image.onload = () => drawMasks(canvas, image, segments);
+      image.onload = () => drawMasks(canvas, image, segmentsWithLabelColors);
       return;
     }
 
-    drawMasks(canvas, image, segments);
-  }, [segments, imageUrl]);
+    drawMasks(canvas, image, segmentsWithLabelColors);
+  }, [segments, segmentsWithLabelColors, imageUrl]);
 
   const downloadJson = () => {
     if (!responseMetadata) {
@@ -145,6 +176,350 @@ export default function App() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'segment-anything.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Convert canvas coordinates to image coordinates
+  const canvasToImageCoords = (canvasX: number, canvasY: number): {x: number; y: number} => {
+    const canvas = overlayCanvasRef.current;
+    const image = imageRef.current;
+    if (!canvas || !image) {
+      return {x: canvasX, y: canvasY};
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = image.naturalWidth / rect.width;
+    const scaleY = image.naturalHeight / rect.height;
+
+    return {
+      x: (canvasX - rect.left) * scaleX,
+      y: (canvasY - rect.top) * scaleY,
+    };
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isRefineMode || !selectedSegmentId) {
+      return;
+    }
+
+    const coords = canvasToImageCoords(e.clientX, e.clientY);
+    setBboxStart(coords);
+    setBboxCurrent(coords);
+    setIsDrawing(true);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDrawing || !bboxStart) {
+      return;
+    }
+
+    const coords = canvasToImageCoords(e.clientX, e.clientY);
+    setBboxCurrent(coords);
+  };
+
+  const handleMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDrawing || !bboxStart || !selectedSegmentId || !imageFile) {
+      setIsDrawing(false);
+      return;
+    }
+
+    const coords = canvasToImageCoords(e.clientX, e.clientY);
+    setIsDrawing(false);
+
+    // Calculate bbox [x, y, width, height]
+    const x = Math.min(bboxStart.x, coords.x);
+    const y = Math.min(bboxStart.y, coords.y);
+    const width = Math.abs(coords.x - bboxStart.x);
+    const height = Math.abs(coords.y - bboxStart.y);
+
+    // Require minimum bbox size
+    if (width < 10 || height < 10) {
+      setBboxStart(null);
+      setBboxCurrent(null);
+      return;
+    }
+
+    const bbox = [x, y, width, height];
+
+    // Call refine API
+    setIsLoading(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append('image', imageFile);
+    formData.append('bbox', JSON.stringify(bbox));
+    formData.append('segment_id', String(selectedSegmentId));
+    formData.append('segments', JSON.stringify(segments));
+    formData.append('model_size', modelSize);
+
+    try {
+      const response = await fetch(`${sanitizedEndpoint}/refine-segment`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || 'Refinement request failed');
+      }
+
+      const data = await response.json();
+
+      // Update segments: remove original, add refined and remainder
+      setSegments(prevSegments => {
+        const filtered = prevSegments.filter(s => s.id !== selectedSegmentId);
+        const updated = [...filtered];
+
+        if (data.remainder_segment) {
+          updated.push(data.remainder_segment);
+        }
+        if (data.refined_segment) {
+          updated.push(data.refined_segment);
+        }
+
+        return updated;
+      });
+
+      // Clear selection and bbox
+      setSelectedSegmentId(null);
+      setBboxStart(null);
+      setBboxCurrent(null);
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Refinement failed');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Draw bbox overlay
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas || !bboxStart || !bboxCurrent) {
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+      return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return;
+    }
+
+    const image = imageRef.current;
+    if (!image) {
+      return;
+    }
+
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw bbox
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([5, 5]);
+
+    const x = Math.min(bboxStart.x, bboxCurrent.x);
+    const y = Math.min(bboxStart.y, bboxCurrent.y);
+    const width = Math.abs(bboxCurrent.x - bboxStart.x);
+    const height = Math.abs(bboxCurrent.y - bboxStart.y);
+
+    ctx.strokeRect(x, y, width, height);
+  }, [bboxStart, bboxCurrent]);
+
+  const handleSegmentClick = (segmentId: number | string) => {
+    if (isRefineMode) {
+      setSelectedSegmentId(segmentId);
+      // Clear any previous bbox
+      setBboxStart(null);
+      setBboxCurrent(null);
+    } else if (selectedLabel) {
+      // Paint bucket mode: assign label to segment
+      assignLabelToSegment(segmentId, selectedLabel);
+    }
+  };
+
+  const assignLabelToSegment = (segmentId: number | string, label: string) => {
+    setSegments(prevSegments =>
+      prevSegments.map(seg =>
+        seg.id === segmentId ? {...seg, label} : seg
+      )
+    );
+  };
+
+  const clearSegmentLabel = (segmentId: number | string) => {
+    setSegments(prevSegments =>
+      prevSegments.map(seg =>
+        seg.id === segmentId ? {...seg, label: undefined} : seg
+      )
+    );
+  };
+
+  const addLabel = () => {
+    const trimmed = newLabelInput.trim();
+    if (trimmed && !labels.includes(trimmed)) {
+      setLabels(prev => [...prev, trimmed]);
+      setNewLabelInput('');
+    }
+  };
+
+  const removeLabel = (label: string) => {
+    setLabels(prev => prev.filter(l => l !== label));
+    if (selectedLabel === label) {
+      setSelectedLabel(null);
+    }
+    // Remove this label from all segments
+    setSegments(prevSegments =>
+      prevSegments.map(seg =>
+        seg.label === label ? {...seg, label: undefined} : seg
+      )
+    );
+  };
+
+  // Get color for a label (consistent color per label)
+  const getLabelColor = (label: string): string => {
+    const index = labels.indexOf(label);
+    if (index === -1) return '#000000';
+    const hue = (index * 0.618033988749895) % 1.0;
+    const r = Math.floor(Math.sin(hue * Math.PI * 2) * 127 + 128);
+    const g = Math.floor(Math.sin((hue + 0.33) * Math.PI * 2) * 127 + 128);
+    const b = Math.floor(Math.sin((hue + 0.66) * Math.PI * 2) * 127 + 128);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+  };
+
+  // Override segment colors based on labels
+  const segmentsWithLabelColors = useMemo(() => {
+    return segments.map(seg => ({
+      ...seg,
+      color: seg.label ? getLabelColor(seg.label) : seg.color,
+    }));
+  }, [segments, labels]);
+
+  // Save project function
+  const saveProject = async () => {
+    if (!responseMetadata || segments.length === 0) {
+      return;
+    }
+
+    setIsSaving(true);
+    setSaveError(null);
+
+    const formData = new FormData();
+    formData.append('data', JSON.stringify({
+      image: responseMetadata.image,
+      image_filename: imageFile?.name || 'image.jpg',
+      segments: segments,
+      labels: labels,
+    }));
+
+    try {
+      const response = await fetch(`${sanitizedEndpoint}/save-project`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || 'Save request failed');
+      }
+
+      const data = await response.json();
+      setLastSaved(new Date());
+      console.log('Project saved:', data);
+    } catch (err) {
+      if (err instanceof Error) {
+        setSaveError(err.message);
+      } else {
+        setSaveError('Save failed');
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Auto-save logic with debounce
+  useEffect(() => {
+    // Clear existing timeout
+    if (autoSaveTimeoutRef.current) {
+      window.clearTimeout(autoSaveTimeoutRef.current);
+    }
+
+    // Only auto-save if we have segments
+    if (segments.length === 0) {
+      return;
+    }
+
+    // Set up new timeout for auto-save (30 seconds)
+    autoSaveTimeoutRef.current = window.setTimeout(() => {
+      saveProject();
+    }, 30000);
+
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        window.clearTimeout(autoSaveTimeoutRef.current);
+      }
+    };
+  }, [segments, labels]);
+
+  // Download COCO JSON
+  const downloadCocoJson = () => {
+    if (!responseMetadata || segments.length === 0) {
+      return;
+    }
+
+    // Build COCO format
+    const categories = labels.map((label, idx) => ({
+      id: idx + 1,
+      name: label,
+      supercategory: 'object',
+    }));
+
+    const labelToId: Record<string, number> = {};
+    labels.forEach((label, idx) => {
+      labelToId[label] = idx + 1;
+    });
+
+    const annotations = segments
+      .filter(seg => seg.label && labelToId[seg.label])
+      .map((seg, idx) => ({
+        id: idx + 1,
+        image_id: 1,
+        category_id: labelToId[seg.label!],
+        bbox: seg.bbox,
+        area: seg.area,
+        segmentation: seg.segmentation,
+        iscrowd: 0,
+        score: seg.predicted_iou,
+      }));
+
+    const cocoFormat = {
+      images: [{
+        id: 1,
+        file_name: imageFile?.name || 'image.jpg',
+        width: responseMetadata.image.width,
+        height: responseMetadata.image.height,
+      }],
+      annotations,
+      categories,
+    };
+
+    const blob = new Blob([JSON.stringify(cocoFormat, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'coco_annotations.json';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -209,6 +584,134 @@ export default function App() {
             <button type="submit" disabled={isLoading}>
               {isLoading ? 'Segmenting…' : 'Segment Image'}
             </button>
+
+            <hr />
+
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={isRefineMode}
+                onChange={event => {
+                  setIsRefineMode(event.target.checked);
+                  if (!event.target.checked) {
+                    setSelectedSegmentId(null);
+                    setBboxStart(null);
+                    setBboxCurrent(null);
+                  }
+                }}
+                disabled={segments.length === 0}
+              />
+              Refinement Mode
+            </label>
+
+            {isRefineMode && (
+              <p className="hint">
+                {selectedSegmentId
+                  ? `Selected segment ${selectedSegmentId}. Draw a box on the image to refine.`
+                  : 'Click a segment card to select it for refinement.'}
+              </p>
+            )}
+
+            <hr />
+
+            <div>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem'}}>
+                <strong>Labels</strong>
+                <button
+                  type="button"
+                  onClick={() => setShowLabelSettings(!showLabelSettings)}
+                  style={{fontSize: '0.85rem', padding: '0.35rem 0.75rem'}}
+                >
+                  {showLabelSettings ? 'Hide' : 'Manage'}
+                </button>
+              </div>
+
+              {showLabelSettings && (
+                <div style={{marginBottom: '1rem', padding: '0.75rem', background: '#f8fafc', borderRadius: '8px'}}>
+                  <div style={{display: 'flex', gap: '0.5rem', marginBottom: '0.5rem'}}>
+                    <input
+                      type="text"
+                      value={newLabelInput}
+                      onChange={e => setNewLabelInput(e.target.value)}
+                      onKeyPress={e => e.key === 'Enter' && addLabel()}
+                      placeholder="New label name"
+                      style={{flex: 1, padding: '0.4rem', fontSize: '0.9rem', borderRadius: '6px', border: '1px solid #cbd5e1'}}
+                    />
+                    <button
+                      type="button"
+                      onClick={addLabel}
+                      style={{padding: '0.4rem 0.75rem', fontSize: '0.9rem'}}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem'}}>
+                    {labels.map(label => (
+                      <div
+                        key={label}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.5rem',
+                          padding: '0.35rem 0.6rem',
+                          background: '#fff',
+                          border: '1px solid #e2e8f0',
+                          borderRadius: '6px',
+                          fontSize: '0.9rem',
+                        }}
+                      >
+                        <span>{label}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeLabel(label)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#dc2626',
+                            cursor: 'pointer',
+                            padding: '0',
+                            fontSize: '0.9rem',
+                            lineHeight: 1,
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem'}}>
+                {labels.map(label => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => setSelectedLabel(selectedLabel === label ? null : label)}
+                    disabled={isRefineMode}
+                    className={selectedLabel === label ? 'label-button selected' : 'label-button'}
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      fontSize: '0.9rem',
+                      background: selectedLabel === label ? getLabelColor(label) : '#fff',
+                      color: selectedLabel === label ? '#fff' : '#334155',
+                      border: `2px solid ${getLabelColor(label)}`,
+                      borderRadius: '8px',
+                      cursor: isRefineMode ? 'not-allowed' : 'pointer',
+                      opacity: isRefineMode ? 0.5 : 1,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {selectedLabel && !isRefineMode && (
+                <p className="hint">
+                  Label selected: <strong>{selectedLabel}</strong>. Click segments to apply this label.
+                </p>
+              )}
+            </div>
           </form>
 
           {error && <p className="error">{error}</p>}
@@ -222,6 +725,18 @@ export default function App() {
             <div className="viewer">
               <img ref={imageRef} src={imageUrl} alt="uploaded" />
               <canvas ref={canvasRef} />
+              <canvas
+                ref={overlayCanvasRef}
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  cursor: isRefineMode && selectedSegmentId ? 'crosshair' : 'default',
+                }}
+              />
             </div>
           ) : (
             <div className="placeholder">Upload an image to see the preview.</div>
@@ -231,12 +746,34 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>Segments ({segments.length})</h2>
-            <div className="panel-actions">
+            <div style={{display: 'flex', gap: '0.5rem', flexWrap: 'wrap'}}>
+              <button
+                onClick={saveProject}
+                disabled={isSaving || segments.length === 0}
+                style={{
+                  backgroundColor: '#10b981',
+                  fontSize: '1.05rem',
+                  fontWeight: 600,
+                  padding: '0.75rem 1.5rem',
+                }}
+              >
+                {isSaving ? 'Saving...' : '💾 Save Project'}
+              </button>
+              <button onClick={downloadCocoJson} disabled={segments.length === 0}>
+                Download COCO JSON
+              </button>
               <button onClick={downloadJson} disabled={!responseMetadata}>
-                Download JSON
+                Download RAW JSON
               </button>
             </div>
           </div>
+
+          {lastSaved && (
+            <p className="hint" style={{color: '#10b981'}}>
+              ✓ Last saved: {lastSaved.toLocaleTimeString()} (Auto-save in 30s)
+            </p>
+          )}
+          {saveError && <p className="error">Save failed: {saveError}</p>}
 
           {responseMetadata?.model_size && (
             <p className="hint">Generated with model: {responseMetadata.model_size}</p>
@@ -246,19 +783,56 @@ export default function App() {
             <p className="hint">Run segmentation to populate mask proposals.</p>
           ) : (
             <div className="segment-grid">
-              {segments.map(segment => (
-                <article key={segment.id} className="segment-card">
-                  <div className="swatch" style={{backgroundColor: segment.color}} />
-                  <div>
-                    <p className="segment-title">Mask #{segment.id}</p>
-                    <p className="segment-meta">
-                      area: {segment.area.toFixed(0)} px² • IoU:{' '}
-                      {segment.predicted_iou.toFixed(3)} • stability:{' '}
-                      {segment.stability_score.toFixed(3)}
-                    </p>
-                  </div>
-                </article>
-              ))}
+              {segments.map(segment => {
+                const displayColor = segment.label ? getLabelColor(segment.label) : segment.color;
+                return (
+                  <article
+                    key={segment.id}
+                    className={`segment-card ${
+                      isRefineMode && selectedSegmentId === segment.id ? 'selected' : ''
+                    } ${isRefineMode || selectedLabel ? 'clickable' : ''}`}
+                    onClick={() => handleSegmentClick(segment.id)}
+                    style={{
+                      cursor: isRefineMode || selectedLabel ? 'pointer' : 'default',
+                    }}
+                  >
+                    <div className="swatch" style={{backgroundColor: displayColor}} />
+                    <div style={{flex: 1}}>
+                      <p className="segment-title">Mask #{segment.id}</p>
+                      {segment.label && (
+                        <p style={{margin: '0.25rem 0', fontSize: '0.85rem', fontWeight: 600, color: displayColor}}>
+                          Label: {segment.label}
+                        </p>
+                      )}
+                      <p className="segment-meta">
+                        area: {segment.area.toFixed(0)} px² • IoU:{' '}
+                        {segment.predicted_iou.toFixed(3)}
+                      </p>
+                    </div>
+                    {segment.label && !isRefineMode && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          clearSegmentLabel(segment.id);
+                        }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#dc2626',
+                          cursor: 'pointer',
+                          fontSize: '1.2rem',
+                          padding: '0.25rem',
+                          lineHeight: 1,
+                        }}
+                        title="Clear label"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </article>
+                );
+              })}
             </div>
           )}
         </section>
