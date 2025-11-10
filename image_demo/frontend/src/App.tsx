@@ -283,8 +283,7 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
     return;
   }
 
-  ctx.clearRect(0, 0, width, height);
-  ctx.globalAlpha = 1;
+  const overlay = ctx.createImageData(width, height);
 
   segments.forEach(segment => {
     const rle: RLEObject = {
@@ -296,31 +295,38 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
     const maskData = decoded.data as Uint8Array;
     const maskHeight = decoded.shape[0];
     const maskWidth = decoded.shape[1];
+    const maskRowMajor = new Uint8Array(maskHeight * maskWidth);
+
+    for (let y = 0; y < maskHeight; y++) {
+      for (let x = 0; x < maskWidth; x++) {
+        const srcIndex = x * maskHeight + y; // convert Fortran-order to row-major
+        const dstIndex = y * maskWidth + x;
+        maskRowMajor[dstIndex] = maskData[srcIndex];
+      }
+    }
 
     const [r, g, b] = hexToRgb(segment.color);
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = maskWidth;
-    maskCanvas.height = maskHeight;
-    const maskCtx = maskCanvas.getContext('2d');
-    if (!maskCtx) {
-      return;
-    }
+    const scaleX = maskWidth / width;
+    const scaleY = maskHeight / height;
 
-    const maskImage = maskCtx.createImageData(maskWidth, maskHeight);
-    for (let i = 0; i < maskData.length; i++) {
-      if (maskData[i] === 0) {
-        continue;
+    for (let y = 0; y < height; y++) {
+      const srcY = Math.min(Math.floor(y * scaleY), maskHeight - 1);
+      for (let x = 0; x < width; x++) {
+        const srcX = Math.min(Math.floor(x * scaleX), maskWidth - 1);
+        const srcIndex = srcY * maskWidth + srcX;
+        if (maskRowMajor[srcIndex] === 0) {
+          continue;
+        }
+        const dstIndex = (y * width + x) * 4;
+        overlay.data[dstIndex] = r;
+        overlay.data[dstIndex + 1] = g;
+        overlay.data[dstIndex + 2] = b;
+        overlay.data[dstIndex + 3] = 140;
       }
-      const offset = i * 4;
-      maskImage.data[offset] = r;
-      maskImage.data[offset + 1] = g;
-      maskImage.data[offset + 2] = b;
-      maskImage.data[offset + 3] = 140;
     }
-
-    maskCtx.putImageData(maskImage, 0, 0);
-    ctx.drawImage(maskCanvas, 0, 0, maskWidth, maskHeight, 0, 0, width, height);
   });
+
+  ctx.putImageData(overlay, 0, 0);
 }
 
 function hexToRgb(hex: string): [number, number, number] {
