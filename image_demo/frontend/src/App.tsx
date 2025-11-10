@@ -279,6 +279,11 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
   canvas.height = height;
 
   ctx.clearRect(0, 0, width, height);
+  if (segments.length === 0) {
+    return;
+  }
+
+  const overlay = ctx.createImageData(width, height);
 
   segments.forEach(segment => {
     const rle: RLEObject = {
@@ -288,24 +293,21 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
 
     const decoded = decode([rle]);
     const maskData = decoded.data as Uint8Array;
-    const maskHeight = decoded.shape[0];
-    const maskWidth = decoded.shape[1];
     const [r, g, b] = hexToRgb(segment.color);
 
-    const imageData = ctx.createImageData(maskWidth, maskHeight);
     for (let i = 0; i < maskData.length; i++) {
       if (maskData[i] === 0) {
         continue;
       }
       const offset = i * 4;
-      imageData.data[offset] = r;
-      imageData.data[offset + 1] = g;
-      imageData.data[offset + 2] = b;
-      imageData.data[offset + 3] = 120;
+      overlay.data[offset] = r;
+      overlay.data[offset + 1] = g;
+      overlay.data[offset + 2] = b;
+      overlay.data[offset + 3] = 140;
     }
-
-    ctx.putImageData(imageData, 0, 0);
   });
+
+  ctx.putImageData(overlay, 0, 0);
 }
 
 function hexToRgb(hex: string): [number, number, number] {
