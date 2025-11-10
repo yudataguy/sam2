@@ -114,6 +114,10 @@ button:disabled {
   pointer-events: none;
 }
 
+.viewer canvas.overlay-canvas {
+  pointer-events: auto;
+}
+
 .placeholder {
   text-align: center;
   padding: 2rem;

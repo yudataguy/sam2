@@ -184,6 +184,19 @@ export default function App() {
     drawMasks(canvas, image, segmentsWithLabelColors);
   }, [segments, segmentsWithLabelColors, imageUrl]);
 
+  // Sync overlay canvas dimensions with image
+  useEffect(() => {
+    const overlayCanvas = overlayCanvasRef.current;
+    const image = imageRef.current;
+
+    if (!overlayCanvas || !image || !image.complete) {
+      return;
+    }
+
+    overlayCanvas.width = image.naturalWidth;
+    overlayCanvas.height = image.naturalHeight;
+  }, [imageUrl]);
+
   const downloadJson = () => {
     if (!responseMetadata) {
       return;
@@ -727,13 +740,11 @@ export default function App() {
               <canvas ref={canvasRef} />
               <canvas
                 ref={overlayCanvasRef}
+                className="overlay-canvas"
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
                   cursor: isRefineMode && selectedSegmentId ? 'crosshair' : 'default',
                 }}
               />
