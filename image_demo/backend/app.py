@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from PIL import Image
 import torch
 
@@ -110,6 +111,11 @@ def _get_mask_generator(model_size: str | None) -> SAM2AutomaticMaskGenerator:
     return _GENERATOR_CACHE[resolved]
 
 app = Flask(__name__)
+CORS(
+    app,
+    resources={r"/segment-image": {"origins": "*"}, r"/health": {"origins": "*"}},
+    supports_credentials=False,
+)
 
 
 @app.get("/health")
