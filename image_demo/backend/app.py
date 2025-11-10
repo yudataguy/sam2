@@ -151,6 +151,7 @@ CORS(
     resources={
         r"/segment-image": {"origins": "*"},
         r"/refine-segment": {"origins": "*"},
+        r"/create-mask": {"origins": "*"},
         r"/save-project": {"origins": "*"},
         r"/health": {"origins": "*"}
     },
@@ -409,6 +410,102 @@ def refine_segment() -> Any:
         "refined_segment": refined_segment,
         "remainder_segment": updated_segments[0] if len(updated_segments) > 1 else None,
         "original_segment_id": segment_id,
+    })
+
+
+@app.post("/create-mask")
+def create_mask() -> Any:
+    """Create a new independent mask from a bounding box region."""
+    # Parse request
+    if "image" not in request.files:
+        return jsonify({"error": "missing 'image' in multipart form"}), 400
+
+    try:
+        image = Image.open(request.files["image"].stream).convert("RGB")
+    except Exception as exc:
+        logger.exception("failed to read uploaded image")
+        return jsonify({"error": f"failed to read image: {exc}"}), 400
+
+    image_np = np.array(image)
+
+    # Get parameters
+    try:
+        bbox_str = request.form.get("bbox")
+        if not bbox_str:
+            return jsonify({"error": "missing 'bbox' parameter"}), 400
+        bbox = json.loads(bbox_str)  # [x, y, width, height]
+
+    except (json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"error": f"invalid parameter format: {exc}"}), 400
+
+    # Get predictor
+    model_size = request.form.get("model_size") or request.args.get("model_size")
+    try:
+        predictor = _get_image_predictor(model_size)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    # Set image for predictor
+    try:
+        predictor.set_image(image_np)
+    except Exception as exc:
+        logger.exception("failed to set image")
+        return jsonify({"error": f"failed to set image: {exc}"}), 500
+
+    # Convert bbox from [x, y, w, h] to [x1, y1, x2, y2]
+    x, y, w, h = bbox
+    input_box = np.array([x, y, x + w, y + h])
+
+    # Predict with bbox prompt
+    try:
+        masks, scores, _ = predictor.predict(
+            box=input_box,
+            multimask_output=True,  # Get multiple mask candidates
+        )
+    except Exception as exc:
+        logger.exception("mask creation prediction failed")
+        return jsonify({"error": f"prediction failed: {exc}"}), 500
+
+    # Get all masks and scores
+    # masks shape: (num_masks, H, W)
+    payload_masks = []
+
+    for i, (mask, score) in enumerate(zip(masks, scores)):
+        # Encode mask to RLE
+        try:
+            mask_rle = _encode_rle_mask(mask.astype(np.uint8))
+        except Exception as exc:
+            logger.exception("failed to encode mask")
+            continue
+
+        # Compute metrics
+        metrics = _compute_mask_metrics(mask.astype(np.uint8))
+
+        # Create segment object
+        segment = {
+            "id": None,  # Will be assigned by frontend
+            "bbox": metrics["bbox"],
+            "area": metrics["area"],
+            "predicted_iou": float(score),
+            "stability_score": 0.0,  # Not available from predictor
+            "segmentation": mask_rle,
+            "color": _index_to_hex(i),  # Generate color for this mask
+        }
+        payload_masks.append(segment)
+
+    if not payload_masks:
+        return jsonify({"error": "no masks generated from the bounding box"}), 400
+
+    # Sort by area/score and return best candidate(s)
+    sorted_masks = sorted(
+        payload_masks,
+        key=lambda m: float(m.get("predicted_iou", 0.0)),
+        reverse=True,
+    )
+
+    return jsonify({
+        "masks": sorted_masks,
+        "bbox": bbox,
     })
 
 

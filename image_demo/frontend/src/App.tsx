@@ -16,6 +16,7 @@ type Segment = {
   label?: string;
   refined_from?: number | string;
   remainder_of?: number | string;
+  parent_id?: number | string; // For hierarchical IDs (parent of 1.1 is 1)
 };
 
 type SegmentResponse = {
@@ -58,6 +59,8 @@ export default function App() {
   const [bboxStart, setBboxStart] = useState<{x: number; y: number} | null>(null);
   const [bboxCurrent, setBboxCurrent] = useState<{x: number; y: number} | null>(null);
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | string | null>(null);
+  const [refinementMode, setRefinementMode] = useState<'refine' | 'create'>('refine'); // 'refine' or 'create'
+  const [highlightedSegmentId, setHighlightedSegmentId] = useState<number | string | null>(null);
 
   // Labeling state
   const [labels, setLabels] = useState<string[]>(() => {
@@ -204,12 +207,12 @@ export default function App() {
     }
 
     if (!image.complete) {
-      image.onload = () => drawMasks(canvas, image, segmentsWithLabelColors);
+      image.onload = () => drawMasks(canvas, image, segmentsWithLabelColors, highlightedSegmentId);
       return;
     }
 
-    drawMasks(canvas, image, segmentsWithLabelColors);
-  }, [segments, segmentsWithLabelColors, imageUrl]);
+    drawMasks(canvas, image, segmentsWithLabelColors, highlightedSegmentId);
+  }, [segments, segmentsWithLabelColors, imageUrl, highlightedSegmentId]);
 
   // Sync overlay canvas dimensions with image
   useEffect(() => {
@@ -304,7 +307,12 @@ export default function App() {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeTab !== 'refine' || selectedSegmentId === null) {
+    if (activeTab !== 'refine') {
+      return;
+    }
+
+    // In refine mode: require a selected segment; in create mode: always allow drawing
+    if (refinementMode === 'refine' && selectedSegmentId === null) {
       return;
     }
 
@@ -324,7 +332,7 @@ export default function App() {
   };
 
   const handleMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || !bboxStart || !selectedSegmentId || !imageFile) {
+    if (!isDrawing || !bboxStart || !imageFile) {
       setIsDrawing(false);
       return;
     }
@@ -347,7 +355,23 @@ export default function App() {
 
     const bbox = [x, y, width, height];
 
-    // Call refine API
+    // Handle refine vs create mode
+    if (refinementMode === 'refine') {
+      if (!selectedSegmentId) {
+        setError('Please select a segment to refine');
+        return;
+      }
+      handleRefineSegment(bbox);
+    } else {
+      handleCreateMask(bbox);
+    }
+  };
+
+  const handleRefineSegment = async (bbox: number[]) => {
+    if (!selectedSegmentId || !imageFile) {
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
 
@@ -371,16 +395,35 @@ export default function App() {
 
       const data = await response.json();
 
-      // Update segments: remove original, add refined and remainder
+      // Update segments with hierarchical IDs
       setSegments(prevSegments => {
+        const parentId = selectedSegmentId;
         const filtered = prevSegments.filter(s => s.id !== selectedSegmentId);
         const updated = [...filtered];
 
-        if (data.remainder_segment) {
-          updated.push(data.remainder_segment);
-        }
+        // Find existing child count for this parent
+        const childCount = updated.filter(s =>
+          String(s.parent_id) === String(parentId)
+        ).length;
+
         if (data.refined_segment) {
-          updated.push(data.refined_segment);
+          // Generate hierarchical ID: parent.childNumber
+          const childId = `${parentId}.${childCount + 1}`;
+          updated.push({
+            ...data.refined_segment,
+            id: childId,
+            parent_id: parentId,
+          });
+        }
+
+        if (data.remainder_segment) {
+          // Remainder gets next child ID
+          const childId = `${parentId}.${childCount + 2}`;
+          updated.push({
+            ...data.remainder_segment,
+            id: childId,
+            parent_id: parentId,
+          });
         }
 
         return updated;
@@ -395,6 +438,68 @@ export default function App() {
         setError(err.message);
       } else {
         setError('Refinement failed');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCreateMask = async (bbox: number[]) => {
+    if (!imageFile) {
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append('image', imageFile);
+    formData.append('bbox', JSON.stringify(bbox));
+    formData.append('model_size', modelSize);
+
+    try {
+      const response = await fetch(`${sanitizedEndpoint}/create-mask`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || 'Create mask request failed');
+      }
+
+      const data = await response.json();
+
+      // Add new mask with fresh sequential ID
+      setSegments(prevSegments => {
+        // Find the max numeric ID
+        const numericIds = prevSegments
+          .filter(s => !String(s.id).includes('.'))
+          .map(s => parseInt(String(s.id), 10))
+          .filter(id => !isNaN(id));
+        const maxId = numericIds.length > 0 ? Math.max(...numericIds) : 0;
+        const newId = maxId + 1;
+
+        if (data.masks && data.masks.length > 0) {
+          // Use the first/best mask from response
+          const mask = data.masks[0];
+          return [...prevSegments, {
+            ...mask,
+            id: newId,
+          }];
+        }
+
+        return prevSegments;
+      });
+
+      // Clear bbox
+      setBboxStart(null);
+      setBboxCurrent(null);
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Create mask failed');
       }
     } finally {
       setIsLoading(false);
@@ -456,6 +561,18 @@ export default function App() {
     ctx.strokeRect(x, y, width, height);
   }, [bboxStart, bboxCurrent]);
 
+  const deleteSegment = (segmentId: number | string) => {
+    setSegments(prevSegments =>
+      prevSegments.filter(s => s.id !== segmentId)
+    );
+    if (selectedSegmentId === segmentId) {
+      setSelectedSegmentId(null);
+    }
+    if (highlightedSegmentId === segmentId) {
+      setHighlightedSegmentId(null);
+    }
+  };
+
   const handleSegmentClick = (segmentId: number | string) => {
     if (activeTab === 'refine') {
       setSelectedSegmentId(segmentId);
@@ -466,6 +583,48 @@ export default function App() {
       // Paint bucket mode: assign label to segment
       assignLabelToSegment(segmentId, selectedLabel);
     }
+  };
+
+  const handleSegmentCardClick = (segmentId: number | string) => {
+    if (activeTab === 'segments') {
+      setHighlightedSegmentId(highlightedSegmentId === segmentId ? null : segmentId);
+      // Scroll to show the mask
+      if (highlightedSegmentId !== segmentId) {
+        scrollToSegment(segmentId);
+      }
+    }
+  };
+
+  const scrollToSegment = (segmentId: number | string) => {
+    const segment = segments.find(s => s.id === segmentId);
+    if (!segment || !segment.bbox) return;
+
+    const viewer = document.querySelector('.viewer');
+    const canvas = canvasRef.current;
+    if (!viewer || !canvas) return;
+
+    // segment.bbox = [x, y, width, height]
+    const [x, y, width, height] = segment.bbox;
+    const centerX = x + width / 2;
+    const centerY = y + height / 2;
+
+    // Get the canvas display dimensions (not natural size)
+    const rect = canvas.getBoundingClientRect();
+    const viewerRect = viewer.getBoundingClientRect();
+
+    // Scale from image coordinates to canvas display coordinates
+    const scaleX = rect.width / canvas.naturalWidth;
+    const scaleY = rect.height / canvas.naturalHeight;
+
+    const displayCenterX = centerX * scaleX;
+    const displayCenterY = centerY * scaleY;
+
+    // Calculate scroll to center the mask in the viewport
+    const scrollLeft = displayCenterX - viewerRect.width / 2 + rect.left;
+    const scrollTop = displayCenterY - viewerRect.height / 2 + rect.top;
+
+    viewer.scrollLeft = scrollLeft;
+    viewer.scrollTop = scrollTop;
   };
 
   const assignLabelToSegment = (segmentId: number | string, label: string) => {
@@ -884,13 +1043,20 @@ export default function App() {
               <div className="segment-grid">
                 {segments.map(segment => {
                   const displayColor = segment.label ? getLabelColor(segment.label) : segment.color;
+                  const isHighlighted = highlightedSegmentId === segment.id;
                   return (
                     <article
                       key={segment.id}
                       className={`segment-card ${selectedLabel ? 'clickable' : ''}`}
-                      onClick={() => handleSegmentClick(segment.id)}
+                      onClick={() => {
+                        handleSegmentCardClick(segment.id);
+                        handleSegmentClick(segment.id);
+                      }}
                       style={{
                         cursor: selectedLabel ? 'pointer' : 'default',
+                        backgroundColor: isHighlighted ? '#f0f4ff' : 'transparent',
+                        border: isHighlighted ? `2px solid ${displayColor}` : '1px solid #e2e8f0',
+                        transition: 'all 0.2s ease',
                       }}
                     >
                       <div className="swatch" style={{backgroundColor: displayColor}} />
@@ -906,27 +1072,48 @@ export default function App() {
                           {segment.predicted_iou.toFixed(3)}
                         </p>
                       </div>
-                      {segment.label && (
+                      <div style={{display: 'flex', gap: '0.25rem', alignItems: 'center'}}>
+                        {segment.label && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              clearSegmentLabel(segment.id);
+                            }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: '#dc2626',
+                              cursor: 'pointer',
+                              fontSize: '1.2rem',
+                              padding: '0.25rem',
+                              lineHeight: 1,
+                            }}
+                            title="Clear label"
+                          >
+                            ×
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            clearSegmentLabel(segment.id);
+                            deleteSegment(segment.id);
                           }}
                           style={{
                             background: 'none',
                             border: 'none',
-                            color: '#dc2626',
+                            color: '#7c3aed',
                             cursor: 'pointer',
                             fontSize: '1.2rem',
                             padding: '0.25rem',
                             lineHeight: 1,
                           }}
-                          title="Clear label"
+                          title="Delete mask"
                         >
-                          ×
+                          🗑️
                         </button>
-                      )}
+                      </div>
                     </article>
                   );
                 })}
@@ -943,10 +1130,49 @@ export default function App() {
                 <p className="hint">Run segmentation first to refine masks.</p>
               ) : (
                 <>
+                  {/* Mode Toggle Buttons */}
+                  <div style={{marginBottom: '1rem', display: 'flex', gap: '0.5rem'}}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRefinementMode('refine');
+                        setSelectedSegmentId(null);
+                      }}
+                      style={{
+                        padding: '0.5rem 1rem',
+                        backgroundColor: refinementMode === 'refine' ? '#3b82f6' : '#e2e8f0',
+                        color: refinementMode === 'refine' ? '#fff' : '#334155',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontWeight: refinementMode === 'refine' ? 600 : 400,
+                      }}
+                    >
+                      Refine Mask
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRefinementMode('create')}
+                      style={{
+                        padding: '0.5rem 1rem',
+                        backgroundColor: refinementMode === 'create' ? '#10b981' : '#e2e8f0',
+                        color: refinementMode === 'create' ? '#fff' : '#334155',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontWeight: refinementMode === 'create' ? 600 : 400,
+                      }}
+                    >
+                      Create New Mask
+                    </button>
+                  </div>
+
                   <p className="hint">
-                    {selectedSegmentId
-                      ? `✓ Segment ${selectedSegmentId} selected. Draw a box on the image to refine it.`
-                      : 'Click a segment card below to select it, then draw a bounding box on the image to refine it.'}
+                    {refinementMode === 'refine'
+                      ? selectedSegmentId
+                        ? `✓ Segment ${selectedSegmentId} selected. Draw a box on the image to refine it.`
+                        : 'Click a segment card below to select it, then draw a bounding box on the image to refine it.'
+                      : 'Draw a bounding box on the image to create a new independent mask in that region.'}
                   </p>
 
                   <div style={{marginTop: '1.5rem'}}>
@@ -991,7 +1217,12 @@ export default function App() {
   );
 }
 
-function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments: Segment[]) {
+function drawMasks(
+  canvas: HTMLCanvasElement,
+  image: HTMLImageElement,
+  segments: Segment[],
+  highlightedSegmentId?: number | string | null
+) {
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     return;
@@ -1033,6 +1264,10 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
     const scaleX = maskWidth / width;
     const scaleY = maskHeight / height;
 
+    // Use higher opacity for highlighted mask, normal for others
+    const isHighlighted = highlightedSegmentId !== null && segment.id === highlightedSegmentId;
+    const alpha = isHighlighted ? 210 : 140; // Brighter overlay for highlighted
+
     for (let y = 0; y < height; y++) {
       const srcY = Math.min(Math.floor(y * scaleY), maskHeight - 1);
       for (let x = 0; x < width; x++) {
@@ -1045,7 +1280,7 @@ function drawMasks(canvas: HTMLCanvasElement, image: HTMLImageElement, segments:
         overlay.data[dstIndex] = r;
         overlay.data[dstIndex + 1] = g;
         overlay.data[dstIndex + 2] = b;
-        overlay.data[dstIndex + 3] = 140;
+        overlay.data[dstIndex + 3] = alpha;
       }
     }
   });
