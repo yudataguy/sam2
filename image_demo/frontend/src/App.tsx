@@ -126,6 +126,23 @@ export default function App() {
     setResponseMetadata(null);
   };
 
+  // Check if backend is reachable
+  const checkBackendHealth = async (): Promise<boolean> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+    try {
+      const response = await fetch(`${sanitizedEndpoint}/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      return response.ok;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      return false;
+    }
+  };
+
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!imageFile) {
@@ -135,6 +152,14 @@ export default function App() {
 
     setIsLoading(true);
     setError(null);
+
+    // Check backend health first
+    const isHealthy = await checkBackendHealth();
+    if (!isHealthy) {
+      setError(`Backend server is not responding at ${sanitizedEndpoint}. Please check the URL and try again.`);
+      setIsLoading(false);
+      return;
+    }
 
     const formData = new FormData();
     formData.append('image', imageFile);
@@ -228,6 +253,52 @@ export default function App() {
       x: (canvasX - rect.left) * scaleX,
       y: (canvasY - rect.top) * scaleY,
     };
+  };
+
+  // Get which segment is at a given image coordinate
+  const getSegmentAtPixel = (imageX: number, imageY: number): number | string | null => {
+    const image = imageRef.current;
+    if (!image) {
+      return null;
+    }
+
+    // Check segments in reverse order (top to bottom in rendering)
+    for (let i = segmentsWithLabelColors.length - 1; i >= 0; i--) {
+      const segment = segmentsWithLabelColors[i];
+      const rle = {
+        counts: segment.segmentation.counts,
+        size: segment.segmentation.size,
+      };
+
+      try {
+        const decoded = decode([rle]);
+        const maskData = decoded.data as Uint8Array;
+        const maskHeight = decoded.shape[0];
+        const maskWidth = decoded.shape[1];
+
+        // Convert image coordinates to mask coordinates
+        const scaleX = maskWidth / image.naturalWidth;
+        const scaleY = maskHeight / image.naturalHeight;
+        const maskX = Math.floor(imageX * scaleX);
+        const maskY = Math.floor(imageY * scaleY);
+
+        // Check if coordinates are within mask bounds
+        if (maskX < 0 || maskX >= maskWidth || maskY < 0 || maskY >= maskHeight) {
+          continue;
+        }
+
+        // Convert from Fortran-order (column-major) to check pixel
+        const maskIndex = maskX * maskHeight + maskY;
+        if (maskIndex >= 0 && maskIndex < maskData.length && maskData[maskIndex] !== 0) {
+          return segment.id;
+        }
+      } catch (e) {
+        // Skip segments with decode errors
+        continue;
+      }
+    }
+
+    return null;
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -325,6 +396,20 @@ export default function App() {
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleImageClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Handle labeling via direct image click
+    if (!selectedLabel || isRefineMode || isDrawing) {
+      return;
+    }
+
+    const coords = canvasToImageCoords(e.clientX, e.clientY);
+    const segmentId = getSegmentAtPixel(coords.x, coords.y);
+
+    if (segmentId !== null) {
+      assignLabelToSegment(segmentId, selectedLabel);
     }
   };
 
@@ -621,7 +706,7 @@ export default function App() {
               <p className="hint">
                 {selectedSegmentId
                   ? `Selected segment ${selectedSegmentId}. Draw a box on the image to refine.`
-                  : 'Click a segment card to select it for refinement.'}
+                  : 'Click a segment card to select it for refinement, then draw a box on the image.'}
               </p>
             )}
 
@@ -721,7 +806,7 @@ export default function App() {
 
               {selectedLabel && !isRefineMode && (
                 <p className="hint">
-                  Label selected: <strong>{selectedLabel}</strong>. Click segments to apply this label.
+                  Label selected: <strong>{selectedLabel}</strong>. Click on the image over a segment or click segment cards to apply this label.
                 </p>
               )}
             </div>
@@ -744,8 +829,9 @@ export default function App() {
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
+                onClick={handleImageClick}
                 style={{
-                  cursor: isRefineMode && selectedSegmentId ? 'crosshair' : 'default',
+                  cursor: isRefineMode && selectedSegmentId ? 'crosshair' : selectedLabel && !isRefineMode ? 'pointer' : 'default',
                 }}
               />
             </div>
@@ -754,7 +840,7 @@ export default function App() {
           )}
         </section>
 
-        <section className="panel">
+        <section className="panel segments-panel">
           <div className="panel-header">
             <h2>Segments ({segments.length})</h2>
             <div style={{display: 'flex', gap: '0.5rem', flexWrap: 'wrap'}}>
